@@ -52,7 +52,7 @@ class SignalMetricsEvaluator:
         return windows
 
     @staticmethod
-    def _calculate_window_bpm_snr(window, fps):
+    def _calculate_window_bpm_snr(window, fps, f_hr_ref=None):
         f, pxx = welch(window, fs=fps, nperseg=len(window))
         valid_idx = np.where((f >= 0.5) & (f <= 4.0))[0]
         if len(valid_idx) == 0: return 0.0, 0.0
@@ -62,8 +62,9 @@ class SignalMetricsEvaluator:
         f_hr = f_valid[peak_idx]
         bpm = f_hr * 60.0
         window_hz = 0.1
+        f_center = f_hr if f_hr_ref is None else f_hr_ref
         signal_mask = np.zeros_like(pxx_valid, dtype=bool)
-        signal_mask[(f_valid >= f_hr - window_hz) & (f_valid <= f_hr + window_hz)] = True
+        signal_mask[(f_valid >= f_center - window_hz) & (f_valid <= f_center + window_hz)] = True
         signal_power = np.sum(pxx_valid[signal_mask])
         noise_power = np.sum(pxx_valid[~signal_mask])
         snr = 10 * np.log10(signal_power / noise_power) if noise_power > 0 else float('inf')
@@ -163,32 +164,18 @@ class HammingECC:
 # ==================== 【2. 算法矩阵库】 ====================
 
 class BaseBlindAdaptiveWatermarker:
-    """提取公共逻辑：固定底部阵地获取 (绝不截断，保留海量冗余投票)"""
 
     def __init__(self, block_size=16, payload_bits=28):
         self.block_size = block_size
         self.payload_bits = payload_bits
 
-    # def _get_fixed_lower_coords(self, blocks_h, blocks_w):
-    #     coords = []
-    #     # 选取底部大约 1/3 的区域，完美避开上半部人脸
-    #     start_i = int(blocks_h * 0.66)
-    #     for i in range(start_i, blocks_h):
-    #         for j in range(blocks_w):
-    #             coords.append((i, j))
-    #     # 返回上千个坐标，利用 idx % 28 自动实现多数投票冗余
-    #     return coords
+
 
     def _get_fixed_lower_coords(self, blocks_h, blocks_w):
-        """
-        【精准打击版】：只选取受试者的躯干/衣服区域，大幅缩小视觉影响范围。
-        """
         coords = []
 
-        # 1. 垂直方向：只取画面最底部的 25% ~ 30% (完美避开下巴和脖子)
         start_i = int(blocks_h * 0.75)
 
-        # 2. 水平方向：切掉左右两侧各 20% 的纯色背景，只保留中间 60% 的受试者身体
         start_j = int(blocks_w * 0.20)
         end_j = int(blocks_w * 0.80)
 
@@ -196,7 +183,6 @@ class BaseBlindAdaptiveWatermarker:
             for j in range(start_j, end_j):
                 coords.append((i, j))
 
-        # 返回躯干区域的坐标，供后续多数投票使用
         return coords
 
     def _get_tex_factor(self, block):
@@ -205,7 +191,6 @@ class BaseBlindAdaptiveWatermarker:
         return np.clip(var / 30.0, 0.5, 4.0)
 
 
-# 2.1 你的方案：集中差分 DCT (保留自适应，画质碾压)
 class JND_DifferentialWatermarker(BaseBlindAdaptiveWatermarker):
     def __init__(self, border_blocks=3):
         super().__init__()
@@ -232,7 +217,6 @@ class JND_DifferentialWatermarker(BaseBlindAdaptiveWatermarker):
                 by, bx = i * self.block_size, j * self.block_size
                 block = y[by:by + 16, bx:bx + 16]
 
-                # 【特权】：仅本文方法享受纹理自适应强度保护画质
                 margin = self.base_margin * self._get_tex_factor(block)
 
                 dct = cv2.dct(block)
@@ -277,7 +261,6 @@ class JND_DifferentialWatermarker(BaseBlindAdaptiveWatermarker):
         return np.array(extr)
 
 
-# 2.2 对照组：QIM DCT (恢复绝对固定强度)
 class QIM_Watermarker(BaseBlindAdaptiveWatermarker):
     def __init__(self, border_blocks=3, delta=100):
         super().__init__()
@@ -307,7 +290,6 @@ class QIM_Watermarker(BaseBlindAdaptiveWatermarker):
                 bit = bits[idx % 28]
                 for cy, cx in self.coords:
                     c = dct[cy, cx]
-                    # 绝对公平：不再乘以 tex_factor，直接用重装甲硬砸
                     dct[cy, cx] = np.round((c - d1) / self.delta) * self.delta + d1 if bit == 1 else np.round(
                         (c - d0) / self.delta) * self.delta + d0
                 y[by:by + 16, bx:bx + 16] = cv2.idct(dct)
@@ -347,7 +329,6 @@ class QIM_Watermarker(BaseBlindAdaptiveWatermarker):
         return np.array(extr)
 
 
-# 2.3 对照组：扩频 SS (恢复绝对固定强度)
 class SS_Watermarker(BaseBlindAdaptiveWatermarker):
     def __init__(self, border_blocks=3, alpha=25):
         super().__init__()
@@ -406,7 +387,6 @@ class SS_Watermarker(BaseBlindAdaptiveWatermarker):
         return np.array(extr)
 
 
-# 2.4 对照组：STDM (恢复绝对固定强度)
 class STDM_Watermarker(BaseBlindAdaptiveWatermarker):
     def __init__(self, border_blocks=3, delta=150):
         super().__init__()
@@ -477,7 +457,6 @@ class STDM_Watermarker(BaseBlindAdaptiveWatermarker):
         return np.array(extr)
 
 
-# 2.5 对照组：DWT-SVD (恢复绝对固定强度)
 class DWT_SVD_Watermarker(BaseBlindAdaptiveWatermarker):
     def __init__(self, border_blocks=3, delta=60):
         super().__init__()
@@ -543,7 +522,7 @@ class DWT_SVD_Watermarker(BaseBlindAdaptiveWatermarker):
         return np.array(extr)
 
 
-# ==================== 【3. 主控获取函数】 ====================
+
 def get_base_pyvhr_data(video_path):
     print(f"[*] 正在利用 pyVHR 提取参考 BVP 信号 (Baseline)...")
     pipe = Pipeline()
@@ -572,13 +551,11 @@ def extract_subject_id(video_path):
     return dir_name if 'subject' in dir_name.lower() else 'unknown_subject'
 
 
-# ==================== 【4. 大一统实验引擎】 ====================
 if __name__ == "__main__":
     os.makedirs(OUT_BASE_DIR, exist_ok=True)
     qp_list = [22, 26, 30, 34, 38, 42]
     codecs_to_test = {'H.264': ('libx264', 'mp4'), 'H.265': ('libx265', 'mp4')}
 
-    # 声明全部待测算法 (对照组均恢复固定装甲强度)
     algorithms = {
         'Proposed_JND': JND_DifferentialWatermarker(border_blocks=3),
         'QIM': QIM_Watermarker(border_blocks=3, delta=100),
