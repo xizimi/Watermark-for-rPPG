@@ -78,7 +78,7 @@ class SignalMetricsEvaluator:
         bpm_maes, rec_snrs = [], []
         for i in range(min_len):
             orig_bpm, _ = cls._calculate_window_bpm_snr(orig_windows[i], fps)
-            rec_bpm, rec_snr = cls._calculate_window_bpm_snr(rec_windows[i], fps)
+             rec_bpm, rec_snr = cls._calculate_window_bpm_snr(rec_windows[i], fps, f_hr_ref=orig_bpm / 60.0)
             if orig_bpm > 0 and rec_bpm > 0:
                 bpm_maes.append(abs(orig_bpm - rec_bpm))
                 rec_snrs.append(rec_snr)
